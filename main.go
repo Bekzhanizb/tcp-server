@@ -9,22 +9,33 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
+type Cleint struct {
+	conn net.Conn
+	name string
+}
+
+func (c *Cleint) RemoteAddr() string {
+	return c.conn.RemoteAddr().String()
+}
+
 func main() {
 	port := "8989"
 	addr := ":" + port
 
-	listener, err := net.Listen("tcp", ":"+port)
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal("Failed to listen on %s: %v", addr, err)
 	}
 	defer listener.Close()
 
 	log.Printf("TCP server started on %s", addr)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -76,24 +87,37 @@ func main() {
 		}(conn)
 	}
 
+	log.Println("Server Stopped")
 }
 
 func handle(ctx context.Context, conn net.Conn) {
-	defer func() {
-		if cerr := conn.Close(); cerr != nil && cerr != net.ErrClosed {
-			log.Printf("close error from %s: %v", conn.RemoteAddr(), cerr)
-		}
-	}()
+	defer conn.Close()
+
+	client := &Cleint{
+		conn: conn,
+		name: conn.RemoteAddr().String(),
+	}
 
 	writer := bufio.NewWriter(conn)
 	reader := bufio.NewReader(conn)
 
-	if _, err := writer.WriteString(fmt.Sprintf("Hello\r\n")); err != nil {
+	writeLine(writer, "Hello! Enter your name here: ")
+
+	name, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("Failed to read name from %s: %v", client.RemoteAddr())
 		return
 	}
-	if err := writer.Flush(); err != nil {
-		return
+
+	client.name = strings.TrimSpace(name)
+	if client.name == "" {
+		client.name = "default"
 	}
+
+	log.Printf("New connection from %s (IP: %s)", client.name, client.RemoteAddr())
+
+	writeLine(writer, fmt.Sprintf("Welcome %s! You can send message: \nType /whoami to see your IP.\r\n", client.name))
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -104,19 +128,34 @@ func handle(ctx context.Context, conn net.Conn) {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("read error from %s: %v", conn.RemoteAddr(), err)
+				log.Printf("read error from %s (%s): %v", client.name, client.RemoteAddr(), err)
 			}
 			return
 		}
 
-		log.Printf("Received from %s: %v", conn.RemoteAddr(), line[:len(line)-1])
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 
-		if _, err := writer.WriteString(line); err != nil {
-			return
+		if line == "/whoami" {
+			writeLine(writer, fmt.Sprintf("Your IP: %s\r\n", client.RemoteAddr()))
 		}
-		if err := writer.Flush(); err != nil {
-			return
-		}
+
+		log.Printf("[%s] %s", client.name, line)
+
+		response := fmt.Sprintf("[%s] %s\r\n", client.name, line)
+		writeLine(writer, response)
 	}
 
+}
+
+func writeLine(w *bufio.Writer, line string) {
+	if !strings.HasSuffix(line, "\r\n") {
+		line += "\r\n"
+	}
+	if _, err := w.WriteString(line); err != nil {
+		return
+	}
+	w.Flush()
 }
