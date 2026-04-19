@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"net"
-
-	"github.com/supabase-community/supabase-go"
 )
 
 func main() {
@@ -43,18 +41,4 @@ func handle(conn net.Conn) {
 		writer.Flush()
 	}
 
-}
-
-var client *supabase.Client
-
-func initSupabase() {
-	var err error
-	client, err = supabase.NewClient(
-		"https://your-project.supabase.co",
-		"your-anon-key",
-		nil,
-	)
-	if err != nil {
-		panic(err)
-	}
 }
