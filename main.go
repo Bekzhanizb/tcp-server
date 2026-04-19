@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"log"
 	"net"
 )
 
@@ -25,20 +27,36 @@ func main() {
 }
 
 func handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		if cerr := conn.Close(); cerr != nil && cerr != net.ErrClosed {
+			log.Printf("close error: %v", cerr)
+		}
+	}()
 	writer := bufio.NewWriter(conn)
 	reader := bufio.NewReader(conn)
 
-	writer.WriteString(fmt.Sprintf("Hello\r\n"))
-	writer.Flush()
+	if _, err := writer.WriteString(fmt.Sprintf("Hello\r\n")); err != nil {
+		return
+	}
+	if err := writer.Flush(); err != nil {
+		return
+	}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			if err != io.EOF {
+				log.Printf("read error from %s: %v", conn.RemoteAddr(), err)
+			}
 			return
 		}
-		fmt.Println(line)
-		writer.WriteString(line + "\r\n")
-		writer.Flush()
+		log.Print(line)
+
+		if _, err := writer.WriteString(line); err != nil {
+			return
+		}
+		if err := writer.Flush(); err != nil {
+			return
+		}
 	}
 
 }
