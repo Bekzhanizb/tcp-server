@@ -15,14 +15,15 @@ import (
 	"time"
 )
 
-type Cleint struct {
+type Client struct {
 	conn net.Conn
 	name string
 }
 
-func (c *Cleint) RemoteAddr() string {
-	return c.conn.RemoteAddr().String()
-}
+var (
+	clients   = make(map[*Client]bool)
+	clientsMu sync.RWMutex
+)
 
 func main() {
 	port := "8989"
@@ -30,7 +31,7 @@ func main() {
 
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatal("Failed to listen on %s: %v", addr, err)
+		log.Fatalf("Failed to listen on %s: %v", addr, err)
 	}
 	defer listener.Close()
 
@@ -46,13 +47,15 @@ func main() {
 
 	go func() {
 		<-sigCh
-		log.Printf("Shutdown signal received.Stopping new connections...")
+		log.Printf("Shutdown signal received...")
 
 		cancel()
 		listener.Close()
 
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer shutdownCancel()
+		closeAllClients()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
 		done := make(chan struct{})
 		go func() {
@@ -71,31 +74,33 @@ func main() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if ctx.Err != nil {
+			if ctx.Err() != nil {
 				break
 			}
 			log.Printf("Accept error: %v", err)
 			continue
 		}
 
-		log.Printf("New connection from %s", conn.RemoteAddr())
-
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
-			handle(ctx, c)
+			handleClient(ctx, c)
 		}(conn)
 	}
 
 	log.Println("Server Stopped")
 }
 
-func handle(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+func handleClient(ctx context.Context, conn net.Conn) {
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("Conn close error: %v", err)
+		}
+	}()
 
-	client := &Cleint{
+	client := &Client{
 		conn: conn,
-		name: conn.RemoteAddr().String(),
+		name: "Anonymous",
 	}
 
 	writer := bufio.NewWriter(conn)
@@ -105,18 +110,21 @@ func handle(ctx context.Context, conn net.Conn) {
 
 	name, err := reader.ReadString('\n')
 	if err != nil {
-		log.Printf("Failed to read name from %s: %v", client.RemoteAddr())
 		return
 	}
 
 	client.name = strings.TrimSpace(name)
 	if client.name == "" {
-		client.name = "default"
+		client.name = "Guest"
 	}
 
-	log.Printf("New connection from %s (IP: %s)", client.name, client.RemoteAddr())
+	addClient(client)
+	defer removeClient(client)
 
-	writeLine(writer, fmt.Sprintf("Welcome %s! You can send message: \nType /whoami to see your IP.\r\n", client.name))
+	log.Printf("New connection joined %s (IP: %s)", client.name, client.RemoteAddr())
+
+	broadcast(fmt.Sprintf("*** %s joined the chat ***", client.name), nil)
+	writeLine(writer, fmt.Sprintf("Welcome %s! \nType /help for commands.\r\n", client.name))
 
 	for {
 		select {
@@ -138,16 +146,78 @@ func handle(ctx context.Context, conn net.Conn) {
 			continue
 		}
 
-		if line == "/whoami" {
+		switch line {
+		case "/help":
+			showHelp(writer)
+		case "/whoami":
 			writeLine(writer, fmt.Sprintf("Your IP: %s\r\n", client.RemoteAddr()))
+		case "/users":
+			showUsers(writer)
+		case "/quit":
+			writeLine(writer, "Goodbye!\r\n")
+			broadcast(fmt.Sprintf("*** %s left the chat ***", client.name), nil)
+			return
+		default:
+			msg := fmt.Sprintf("[%s]: %s", client.name, line)
+			log.Printf("[CHAT] %s: %s", client.name, line)
+			broadcast(msg, client)
 		}
 
-		log.Printf("[%s] %s", client.name, line)
-
-		response := fmt.Sprintf("[%s] %s\r\n", client.name, line)
-		writeLine(writer, response)
 	}
 
+}
+
+func addClient(c *Client) {
+	clientsMu.Lock()
+	clients[c] = true
+	clientsMu.Unlock()
+}
+
+func removeClient(c *Client) {
+	clientsMu.Lock()
+	delete(clients, c)
+	clientsMu.Unlock()
+}
+
+func broadcast(message string, sender *Client) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+
+	for client := range clients {
+		if client == sender {
+			continue
+		}
+		_, err := client.conn.Write([]byte(message + "\r\n"))
+		if err != nil {
+			log.Printf("write error to %s: %v", client.name, err)
+		}
+	}
+}
+
+func showHelp(w *bufio.Writer) {
+	help := `Available commands:
+ 			 /help   - show this help
+  			 /whoami - show your IP address
+  			 /users  - list all online users
+			 /quit   - leave the chat`
+	writeLine(w, help)
+}
+
+func showUsers(w *bufio.Writer) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+
+	if len(clients) == 0 {
+		writeLine(w, "No users online.\r\n")
+		return
+	}
+
+	var names []string
+	for client := range clients {
+		names = append(names, client.name)
+	}
+
+	writeLine(w, fmt.Sprintf("Online users (%d): %s\r\n", len(names), strings.Join(names, ", ")))
 }
 
 func writeLine(w *bufio.Writer, line string) {
@@ -158,4 +228,17 @@ func writeLine(w *bufio.Writer, line string) {
 		return
 	}
 	w.Flush()
+}
+
+func (c *Client) RemoteAddr() string {
+	return c.conn.RemoteAddr().String()
+}
+
+func closeAllClients() {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+
+	for c := range clients {
+		_ = c.conn.Close()
+	}
 }
