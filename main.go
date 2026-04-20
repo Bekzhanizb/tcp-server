@@ -124,7 +124,7 @@ func handleClient(ctx context.Context, conn net.Conn) {
 	log.Printf("New connection joined %s (IP: %s)", client.name, client.RemoteAddr())
 
 	broadcast(fmt.Sprintf("*** %s joined the chat ***", client.name), nil)
-	writeLine(writer, fmt.Sprintf("Welcome %s! \nType /help for commands.\r\n", client.name))
+	writeLine(writer, fmt.Sprintf("Welcome %s! Type /help for commands.", client.name))
 
 	for {
 		select {
@@ -136,7 +136,7 @@ func handleClient(ctx context.Context, conn net.Conn) {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("read error from %s (%s): %v", client.name, client.RemoteAddr(), err)
+				log.Printf("Read error from %s (%s): %v", client.name, client.RemoteAddr(), err)
 			}
 			return
 		}
@@ -160,7 +160,8 @@ func handleClient(ctx context.Context, conn net.Conn) {
 		default:
 			msg := fmt.Sprintf("[%s]: %s", client.name, line)
 			log.Printf("[CHAT] %s: %s", client.name, line)
-			broadcast(msg, client)
+
+			broadcast(msg, nil)
 		}
 
 	}
@@ -179,27 +180,35 @@ func removeClient(c *Client) {
 	clientsMu.Unlock()
 }
 
-func broadcast(message string, sender *Client) {
+func broadcast(message string, exclude *Client) {
+	if !strings.HasSuffix(message, "\r\n") {
+		message += "\r\n"
+	}
+
 	clientsMu.RLock()
 	defer clientsMu.RUnlock()
 
-	for client := range clients {
-		if client == sender {
+	for c := range clients {
+		if exclude != nil && c == exclude {
 			continue
 		}
-		_, err := client.conn.Write([]byte(message + "\r\n"))
-		if err != nil {
-			log.Printf("write error to %s: %v", client.name, err)
+
+		w := bufio.NewWriter(c.conn)
+		if _, err := w.WriteString(message); err == nil {
+			w.Flush()
+		} else {
+			log.Printf("Write error to %s: %v", c.name, err)
 		}
 	}
 }
 
 func showHelp(w *bufio.Writer) {
-	help := `Available commands:
- 			 /help   - show this help
-  			 /whoami - show your IP address
-  			 /users  - list all online users
-			 /quit   - leave the chat`
+	help := "Available commands:\r\n" +
+		"/help    - show this help\r\n" +
+		"/whoami  - show your IP address\r\n" +
+		"/users   - list all online users\r\n" +
+		"/quit    - leave the chat\r\n" +
+		"\r\nJust type any message to send it to everyone in the chat."
 	writeLine(w, help)
 }
 
